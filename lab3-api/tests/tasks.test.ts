@@ -9,10 +9,11 @@ describe('task API happy paths', () => {
         const response = await api.get('/tasks');
 
         expect(response.status).toBe(200);
-        expect(response.body).toEqual(
-            expect.arrayContaining([firstTask.body, secondTask.body]),
-        );
-        expect(response.body).toHaveLength(2);
+        expect(response.body).toEqual({
+            data: [secondTask.body, firstTask.body],
+            nextCursor: null,
+            hasMore: false,
+        });
     });
 
     it('POST /tasks creates and returns a task with 201', async () => {
@@ -193,5 +194,110 @@ describe('task input edge cases', () => {
         expect(response.status).toBe(201);
         expect(response.body.description).toBe(description);
         expect(response.body.description).toHaveLength(50_000);
+    });
+});
+describe('GET /tasks pagination', () => {
+    async function createTasks(count: number): Promise<Array<{ id: string }>> {
+        const created: Array<{ id: string }> = [];
+        for (let index = 0; index < count; index += 1) {
+            const response = await createTask({ title: `Task ${index}` });
+            expect(response.status).toBe(201);
+            created.push(response.body);
+        }
+        return created;
+    }
+
+    it('returns tasks newest first and reports that no more pages exist', async () => {
+        const created = await createTasks(3);
+
+        const response = await api.get('/tasks');
+
+        expect(response.status).toBe(200);
+        expect(response.body.data.map((task: { id: string }) => task.id)).toEqual(
+            [...created].reverse().map((task) => task.id),
+        );
+        expect(response.body.nextCursor).toBeNull();
+        expect(response.body.hasMore).toBe(false);
+    });
+
+    it('limits the page size and exposes a cursor for the next page', async () => {
+        await createTasks(7);
+
+        const response = await api.get('/tasks').query({ limit: 5 });
+
+        expect(response.status).toBe(200);
+        expect(response.body.data).toHaveLength(5);
+        expect(response.body.hasMore).toBe(true);
+        expect(response.body.nextCursor).toBe(
+            Buffer.from(response.body.data[4].id, 'utf8').toString('base64'),
+        );
+    });
+
+    it('returns the following page when the cursor is supplied', async () => {
+        const created = await createTasks(7);
+        const newestFirst = [...created].reverse().map((task) => task.id);
+
+        const firstPage = await api.get('/tasks').query({ limit: 5 });
+        const secondPage = await api
+            .get('/tasks')
+            .query({ limit: 5, cursor: firstPage.body.nextCursor });
+
+        expect(secondPage.status).toBe(200);
+        expect(secondPage.body.data.map((task: { id: string }) => task.id)).toEqual(
+            newestFirst.slice(5),
+        );
+        expect(secondPage.body.hasMore).toBe(false);
+        expect(secondPage.body.nextCursor).toBeNull();
+    });
+
+    it('defaults to a page size of 20', async () => {
+        await createTasks(21);
+
+        const response = await api.get('/tasks');
+
+        expect(response.status).toBe(200);
+        expect(response.body.data).toHaveLength(20);
+        expect(response.body.hasMore).toBe(true);
+    });
+
+    it('returns an empty page when no tasks exist', async () => {
+        const response = await api.get('/tasks');
+
+        expect(response.status).toBe(200);
+        expect(response.body).toEqual({ data: [], nextCursor: null, hasMore: false });
+    });
+
+    it.each([['0'], ['101'], ['-1'], ['abc'], ['1.5']])(
+        'rejects limit=%s with 400',
+        async (limit) => {
+            const response = await api.get('/tasks').query({ limit });
+
+            expect(response.status).toBe(400);
+            expect(response.body.error).toEqual({
+                code: 'VALIDATION_ERROR',
+                message: 'Request validation failed',
+                details: ['limit must be an integer between 1 and 100'],
+            });
+        },
+    );
+
+    it('rejects a cursor that is not valid base64 with 400', async () => {
+        const response = await api.get('/tasks').query({ cursor: 'not base64!' });
+
+        expect(response.status).toBe(400);
+        expect(response.body.error.details).toEqual([
+            'cursor must be a base64-encoded task id',
+        ]);
+    });
+
+    it('rejects a cursor for an unknown task with 400', async () => {
+        const cursor = Buffer.from(randomUUID(), 'utf8').toString('base64');
+
+        const response = await api.get('/tasks').query({ cursor });
+
+        expect(response.status).toBe(400);
+        expect(response.body.error.details).toEqual([
+            'cursor does not refer to an existing task',
+        ]);
     });
 });

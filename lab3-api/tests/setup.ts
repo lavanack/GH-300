@@ -1,6 +1,6 @@
 import request, { Response } from 'supertest';
 import { app } from '../src/app';
-import { TaskInput } from '../src/types';
+import { MAX_PAGE_LIMIT, TaskInput } from '../src/types';
 
 /** Supertest client bound directly to the Express application. */
 export const api = request(app);
@@ -24,17 +24,23 @@ export async function createTask(overrides: Partial<TaskInput> = {}): Promise<Re
 }
 
 async function clearTasks(): Promise<void> {
-    const listResponse = await api.get('/tasks');
-    expect(listResponse.status).toBe(200);
+    let hasMore = true;
 
-    const existingTasks = listResponse.body as Array<{ id: string }>;
-    const deleteResponses = await Promise.all(
-        existingTasks.map((task) => api.delete(`/tasks/${task.id}`)),
-    );
+    while (hasMore) {
+        const listResponse = await api.get('/tasks').query({ limit: MAX_PAGE_LIMIT });
+        expect(listResponse.status).toBe(200);
 
-    deleteResponses.forEach((response) => {
-        expect(response.status).toBe(204);
-    });
+        const page = listResponse.body as { data: Array<{ id: string }>; hasMore: boolean };
+        const deleteResponses = await Promise.all(
+            page.data.map((task) => api.delete(`/tasks/${task.id}`)),
+        );
+
+        deleteResponses.forEach((response) => {
+            expect(response.status).toBe(204);
+        });
+
+        hasMore = page.hasMore;
+    }
 }
 
 const requestLogSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
